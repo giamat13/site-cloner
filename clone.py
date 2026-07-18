@@ -8,15 +8,14 @@ Two modes:
   --static   no browser - only HTML + CSS-referenced assets (fast, stdlib only)
 
 Usage:
-    python clone.py URL [output] [--wait SECONDS] [--head] [--static] [--no-subpages] [--depth N]
+    python clone.py URL [output] [--wait SECONDS] [--head] [--static] [--depth N]
 
 output       ends with .zip -> ZIP file;  otherwise -> a folder of the same name
 --wait       seconds to keep the page open so lazy/gameplay assets load (default 8)
 --head       show the browser window; play/click to trigger more loads, CLOSE it to save
 --static     skip the browser entirely (HTML + CSS assets only, no JS)
---no-subpages  clone only the given URL, not pages linked under the same path (default: follows them)
---depth N    how many path levels below the start URL to crawl (default 10; past
-             that it's just wasted probing - nobody nests paths that deep)
+--depth N    how many path levels below the start URL to crawl (default 0 = start page only;
+             0 clones only the given URL, 1+ follows subpages under the same path)
 
 URL may omit the scheme ("google.com" -> "https://google.com").
 """
@@ -175,7 +174,7 @@ def fetch(url):
         return r.read(), r.headers.get_content_type()
 
 
-def clone_static(url, out, crawl_subpages=True, depth=10):
+def clone_static(url, out, crawl_subpages=True, depth=0):
     base_netloc = urlparse(url).netloc
     base_path = unquote(urlparse(url).path) or "/"
     base_dir = base_path if base_path.endswith("/") else posixpath.dirname(base_path) + "/"
@@ -250,7 +249,7 @@ def clone_static(url, out, crawl_subpages=True, depth=10):
 
 
 # --------------------------------------------------------------- browser mode
-def clone_browser(url, out, wait, headless, crawl_subpages=True, depth=10):
+def clone_browser(url, out, wait, headless, crawl_subpages=True, depth=0):
     import os
     # frozen (PyInstaller) builds extract to a new temp dir each run, so pin
     # the browser cache to a stable folder instead of the driver's default
@@ -386,13 +385,13 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     static = "--static" in args
     headless = "--head" not in args
-    crawl_subpages = "--no-subpages" not in args
     wait = 8
     if "--wait" in args:
         wait = float(args[args.index("--wait") + 1])
-    depth = 10
+    depth = 0
     if "--depth" in args:
         depth = int(args[args.index("--depth") + 1])
+    crawl_subpages = depth > 0
     valued = {"--wait", "--depth"}  # flags whose following value isn't a positional
     pos = [a for i, a in enumerate(args)
            if not a.startswith("--") and args[i - 1] not in valued]
