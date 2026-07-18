@@ -8,13 +8,15 @@ Two modes:
   --static   no browser - only HTML + CSS-referenced assets (fast, stdlib only)
 
 Usage:
-    python clone.py URL [output] [--wait SECONDS] [--head] [--static] [--no-subpages]
+    python clone.py URL [output] [--wait SECONDS] [--head] [--static] [--no-subpages] [--depth N]
 
 output       ends with .zip -> ZIP file;  otherwise -> a folder of the same name
 --wait       seconds to keep the page open so lazy/gameplay assets load (default 8)
 --head       show the browser window; play/click to trigger more loads, CLOSE it to save
 --static     skip the browser entirely (HTML + CSS assets only, no JS)
 --no-subpages  clone only the given URL, not pages linked under the same path (default: follows them)
+--depth N    how many path levels below the start URL to crawl (default 10; past
+             that it's just wasted probing - nobody nests paths that deep)
 
 URL may omit the scheme ("google.com" -> "https://google.com").
 """
@@ -74,7 +76,14 @@ def is_subpath(url, base_netloc, base_dir):
     return unquote(p.path or "/").startswith(base_dir)
 
 
-def candidate_subpaths(base_netloc, links):
+def within_depth(url, base_dir, depth):
+    """True if url is at most `depth` path levels below base_dir (0 = start page only)."""
+    rel = unquote(urlparse(url).path or "/")
+    rel = rel[len(base_dir):] if rel.startswith(base_dir) else rel
+    return len([s for s in rel.split("/") if s]) <= depth
+
+
+def candidate_subpaths(base_netloc, base_dir, depth, links):
     """Generic: from every link on the page (even links pointing off-site) derive
     candidate subpaths on THIS host and try them. Covers a homepage that links out to
     e.g. github.com/<user>/<repo> while hosting the live page at <host>/<repo>/.
@@ -92,10 +101,11 @@ def candidate_subpaths(base_netloc, links):
         for i in range(len(segs)):  # cumulative prefixes: /a/, /a/b/, /a/b/c/
             out.add(f"https://{base_netloc}/{'/'.join(segs[:i + 1])}/")
         out.add(f"https://{base_netloc}/{segs[-1]}/")  # and the bare last segment
-    return out
+    return {u for u in out
+            if is_subpath(u, base_netloc, base_dir) and within_depth(u, base_dir, depth)}
 
 
-def harvest_refs(base_netloc, base_dir, text):
+def harvest_refs(base_netloc, base_dir, depth, text):
     """Scan a page's raw text for ANY mention of a URL/path on this same host - not
     just <a href>, but inline scripts, JSON, data-attributes, plain text. Keeps the
     same-host subpaths. Runs alongside link-following to find pages faster."""
@@ -110,7 +120,7 @@ def harvest_refs(base_netloc, base_dir, text):
         last = unquote(p.path).rstrip("/").split("/")[-1]
         if "." in last:  # file/asset-looking, not a page
             continue
-        if is_subpath(u, base_netloc, base_dir):
+        if is_subpath(u, base_netloc, base_dir) and within_depth(u, base_dir, depth):
             out.add(u)
     return out
 
@@ -124,7 +134,7 @@ def eta_str(t0, done, remaining):
     return f"{secs // 60}m{secs % 60:02d}s" if secs >= 60 else f"{secs}s"
 
 
-def discover_sitemap(base_netloc, base_dir):
+def discover_sitemap(base_netloc, base_dir, depth):
     """Generic, works for any domain: pull URLs from robots.txt Sitemap: lines and
     sitemap.xml (recursing into sitemap-index files), keep same-site subpaths.
     This finds pages that aren't linked from anywhere. Silent on any failure."""
@@ -149,7 +159,7 @@ def discover_sitemap(base_netloc, base_dir):
         for loc in locs:
             if loc.endswith(".xml") and loc not in tried:  # sitemap index -> recurse
                 todo.append(loc)
-            elif is_subpath(loc, base_netloc, base_dir):
+            elif is_subpath(loc, base_netloc, base_dir) and within_depth(loc, base_dir, depth):
                 found.append(loc)
     return found
 
@@ -165,7 +175,7 @@ def fetch(url):
         return r.read(), r.headers.get_content_type()
 
 
-def clone_static(url, out, crawl_subpages=True):
+def clone_static(url, out, crawl_subpages=True, depth=10):
     base_netloc = urlparse(url).netloc
     base_path = unquote(urlparse(url).path) or "/"
     base_dir = base_path if base_path.endswith("/") else posixpath.dirname(base_path) + "/"
@@ -177,7 +187,7 @@ def clone_static(url, out, crawl_subpages=True):
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         page_queue = [url]
         if crawl_subpages:
-            page_queue += discover_sitemap(base_netloc, base_dir)
+            page_queue += discover_sitemap(base_netloc, base_dir, depth)
         asset_queue = []
         while page_queue:
             page_url = page_queue.pop(0)
@@ -208,10 +218,12 @@ def clone_static(url, out, crawl_subpages=True):
                     if href.startswith(("data:", "javascript:", "mailto:", "#")):
                         continue
                     absu = urljoin(page_url, href)
-                    if urlparse(absu).scheme.startswith("http") and is_subpath(absu, base_netloc, base_dir):
+                    if (urlparse(absu).scheme.startswith("http")
+                            and is_subpath(absu, base_netloc, base_dir)
+                            and within_depth(absu, base_dir, depth)):
                         page_queue.append(absu)
-                page_queue += list(candidate_subpaths(base_netloc, finder.links))
-                page_queue += list(harvest_refs(base_netloc, base_dir, text))
+                page_queue += list(candidate_subpaths(base_netloc, base_dir, depth, finder.links))
+                page_queue += list(harvest_refs(base_netloc, base_dir, depth, text))
 
         while asset_queue:
             base, ref = asset_queue.pop()
@@ -238,7 +250,7 @@ def clone_static(url, out, crawl_subpages=True):
 
 
 # --------------------------------------------------------------- browser mode
-def clone_browser(url, out, wait, headless, crawl_subpages=True):
+def clone_browser(url, out, wait, headless, crawl_subpages=True, depth=10):
     import os
     # frozen (PyInstaller) builds extract to a new temp dir each run, so pin
     # the browser cache to a stable folder instead of the driver's default
@@ -289,7 +301,7 @@ def clone_browser(url, out, wait, headless, crawl_subpages=True):
         visited_pages = set()
         page_queue = [url]
         if crawl:
-            page_queue += discover_sitemap(base_netloc, base_dir)
+            page_queue += discover_sitemap(base_netloc, base_dir, depth)
         import time
         while page_queue:
             page_url = page_queue.pop(0)
@@ -345,10 +357,11 @@ def clone_browser(url, out, wait, headless, crawl_subpages=True):
                 except Exception:
                     text = ""
                 for h in hrefs:
-                    if h not in visited_pages and is_subpath(h, base_netloc, base_dir):
+                    if (h not in visited_pages and is_subpath(h, base_netloc, base_dir)
+                            and within_depth(h, base_dir, depth)):
                         page_queue.append(h)
-                page_queue += list(candidate_subpaths(base_netloc, hrefs))
-                page_queue += list(harvest_refs(base_netloc, base_dir, text))
+                page_queue += list(candidate_subpaths(base_netloc, base_dir, depth, hrefs))
+                page_queue += list(harvest_refs(base_netloc, base_dir, depth, text))
 
         try:
             browser.close()
@@ -377,14 +390,18 @@ if __name__ == "__main__":
     wait = 8
     if "--wait" in args:
         wait = float(args[args.index("--wait") + 1])
+    depth = 10
+    if "--depth" in args:
+        depth = int(args[args.index("--depth") + 1])
+    valued = {"--wait", "--depth"}  # flags whose following value isn't a positional
     pos = [a for i, a in enumerate(args)
-           if not a.startswith("--") and args[i - 1] != "--wait"]
+           if not a.startswith("--") and args[i - 1] not in valued]
     url = pos[0]
     if "://" not in url:  # allow bare "google.com"
         url = "https://" + url
     # no output given -> a folder named after the site (simplest for non-tech users)
     out = pos[1] if len(pos) > 1 else (urlparse(url).netloc or "site")
     if static:
-        clone_static(url, out, crawl_subpages)
+        clone_static(url, out, crawl_subpages, depth)
     else:
-        clone_browser(url, out, wait, headless, crawl_subpages)
+        clone_browser(url, out, wait, headless, crawl_subpages, depth)
