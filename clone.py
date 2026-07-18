@@ -151,15 +151,33 @@ def clone_browser(url, out, wait, headless):
         print(f"Loading {url} ...", flush=True)
         page.goto(url, wait_until="load", timeout=60000)  # 'load' not 'networkidle': games never idle
         if headless:
-            print(f"Loaded. Waiting {wait:g}s for lazy assets ...", flush=True)
-            page.wait_for_timeout(int(wait * 1000))
+            print(f"Loaded. Collecting assets (up to {wait:g}s, "
+                  "stops early once loading settles) ...", flush=True)
         else:
             print("Loaded. Play/click in the window; CLOSE it when done to save "
                   f"(or auto-saves after {wait:g}s).", flush=True)
-            try:  # end early the moment the user closes the browser window
-                page.wait_for_event("close", timeout=wait * 1000)
+
+        # live heartbeat so it never looks frozen; headless stops after a quiet spell
+        import time
+        deadline = time.time() + wait
+        last, quiet = -1, 0
+        while time.time() < deadline:
+            try:
+                page.wait_for_timeout(1000)  # 1s tick
             except Exception:
-                pass
+                break  # window closed
+            if page.is_closed():
+                break
+            n = len(files)
+            quiet = quiet + 1 if n == last else 0
+            last = n
+            left = int(deadline - time.time())
+            tail = "close window to save" if not headless else "no new assets"
+            print(f"\r  recording... {n} files | {left}s left | {tail} {quiet}s   ",
+                  end="", flush=True)
+            if headless and quiet >= 12:  # 12s with nothing new = done loading
+                break
+        print()
         try:
             browser.close()
         except Exception:
@@ -191,7 +209,8 @@ if __name__ == "__main__":
     url = pos[0]
     if "://" not in url:  # allow bare "google.com"
         url = "https://" + url
-    out = pos[1] if len(pos) > 1 else (urlparse(url).netloc or "site") + ".zip"
+    # no output given -> a folder named after the site (simplest for non-tech users)
+    out = pos[1] if len(pos) > 1 else (urlparse(url).netloc or "site")
     if static:
         clone_static(url, out)
     else:
