@@ -139,10 +139,13 @@ def clone_browser(url, out, wait, headless):
         page.wait_for_timeout(int(wait * 1000))
         browser.close()
 
+    total = len(files)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, data in files.items():
+        for i, (name, data) in enumerate(files.items(), 1):
             z.writestr(name, data)
-    print(f"Done: {out} ({len(files)} files)")
+            print(f"\r  zipping {i}/{total} ({i * 100 // total}%)",
+                  end="", flush=True)
+    print(f"\nDone: {out} ({total} files)")
 
 
 if __name__ == "__main__":
