@@ -111,6 +111,9 @@ def clone_static(url, out):
 # --------------------------------------------------------------- browser mode
 def clone_browser(url, out, wait, headless):
     import os
+    # frozen (PyInstaller) builds extract to a new temp dir each run, so pin
+    # the browser cache to a stable folder instead of the driver's default
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.path.join(os.path.expanduser("~"), "AppData", "Local", "ms-playwright"))
     from playwright.sync_api import sync_playwright  # imported only when used
     base_netloc = urlparse(url).netloc
     as_zip = out.lower().endswith(".zip")
