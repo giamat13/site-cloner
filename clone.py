@@ -8,11 +8,14 @@ Two modes:
   --static   no browser - only HTML + CSS-referenced assets (fast, stdlib only)
 
 Usage:
-    python clone.py URL [output.zip] [--wait SECONDS] [--head] [--static]
+    python clone.py URL [output] [--wait SECONDS] [--head] [--static]
 
+output   ends with .zip -> ZIP file;  otherwise -> a folder of the same name
 --wait   seconds to keep the page open so lazy/gameplay assets load (default 8)
---head   show the browser window so you can click/play to trigger more loads
---static skip the browser entirely
+--head   show the browser window; play/click to trigger more loads, CLOSE it to save
+--static skip the browser entirely (HTML + CSS assets only, no JS)
+
+URL may omit the scheme ("google.com" -> "https://google.com").
 """
 import sys, re, zipfile, posixpath
 from urllib.parse import urljoin, urlparse, unquote
@@ -107,9 +110,21 @@ def clone_static(url, out):
 
 # --------------------------------------------------------------- browser mode
 def clone_browser(url, out, wait, headless):
+    import os
     from playwright.sync_api import sync_playwright  # imported only when used
     base_netloc = urlparse(url).netloc
-    files = {}
+    as_zip = out.lower().endswith(".zip")
+    outdir = out if not as_zip else None
+    files = {}  # name -> bytes  (zip mode: kept for final write; folder mode: written live)
+
+    def save_to_folder(name, data):
+        dest = os.path.join(outdir, name.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(data)
+
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
@@ -122,30 +137,44 @@ def clone_browser(url, out, wait, headless):
                 if resp.url.startswith(("data:", "blob:")):
                     return
                 name = local_path(base_netloc, resp.url)
-                body = resp.body()
-                new = name not in files
-                files[name] = body
-                if new:
-                    print(f"  + [{len(files):>4}] {name}", flush=True)
+                if name in files:
+                    return
+                data = resp.body()
+                files[name] = data
+                if outdir:  # write live so nothing is lost if interrupted
+                    save_to_folder(name, data)
+                print(f"  + [{len(files):>4}] {name}", flush=True)
             except Exception:
                 pass  # ponytail: unreadable body, skip
 
         page.on("response", on_response)
         print(f"Loading {url} ...", flush=True)
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        print(f"Loaded. Waiting {wait:g}s for lazy assets"
-              + (" (play/click in the window to load more) ..." if not headless
-                 else " ..."), flush=True)
-        page.wait_for_timeout(int(wait * 1000))
-        browser.close()
+        page.goto(url, wait_until="load", timeout=60000)  # 'load' not 'networkidle': games never idle
+        if headless:
+            print(f"Loaded. Waiting {wait:g}s for lazy assets ...", flush=True)
+            page.wait_for_timeout(int(wait * 1000))
+        else:
+            print("Loaded. Play/click in the window; CLOSE it when done to save "
+                  f"(or auto-saves after {wait:g}s).", flush=True)
+            try:  # end early the moment the user closes the browser window
+                page.wait_for_event("close", timeout=wait * 1000)
+            except Exception:
+                pass
+        try:
+            browser.close()
+        except Exception:
+            pass
 
     total = len(files)
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for i, (name, data) in enumerate(files.items(), 1):
-            z.writestr(name, data)
-            print(f"\r  zipping {i}/{total} ({i * 100 // total}%)",
-                  end="", flush=True)
-    print(f"\nDone: {out} ({total} files)")
+    if as_zip:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for i, (name, data) in enumerate(files.items(), 1):
+                z.writestr(name, data)
+                print(f"\r  zipping {i}/{total} ({i * 100 // total}%)",
+                      end="", flush=True)
+        print(f"\nDone: {out} ({total} files)")
+    else:
+        print(f"Done: {out}/ ({total} files)")
 
 
 if __name__ == "__main__":
@@ -160,6 +189,8 @@ if __name__ == "__main__":
     pos = [a for i, a in enumerate(args)
            if not a.startswith("--") and args[i - 1] != "--wait"]
     url = pos[0]
+    if "://" not in url:  # allow bare "google.com"
+        url = "https://" + url
     out = pos[1] if len(pos) > 1 else (urlparse(url).netloc or "site") + ".zip"
     if static:
         clone_static(url, out)
